@@ -1,6 +1,7 @@
-
 library(tidyverse)
 library (StatsBombR)
+
+## Import SB Data ## -------------
 
 Comp <- FreeCompetitions()
 Matches <- FreeMatches(Comp)
@@ -31,8 +32,7 @@ ffs = ffs %>% unnest(freeze_frame) %>%
   mutate(ff_location.x = as.numeric(ifelse(ff_location.x == "NULL", NA, ff_location.x)), ff_location.y = as.numeric(ifelse(ff_location.y == "NULL", NA, ff_location.y)))
 
 
-## NEW ##
-
+## Clean Cross Data ## -------------
 
 crosses = ffs %>%
 #  filter(pass.end_location.x>102 & pass.end_location.y>18 & pass.end_location.y<62) %>%
@@ -130,9 +130,9 @@ team <- crosses %>%
   mutate(cross_per_match = total/matches) 
 
 
-## Plot ##
-arw_annotate <- arrow(length = unit(5, 'pt'), type = 'closed')
+## Team Scatter Plot  ## -------------
 
+arw_annotate <- arrow(length = unit(5, 'pt'), type = 'closed')
 
 p <- team %>%
   ggplot(aes(x=avg_area_delta, y=shot_assists_per, label=team.name)) +
@@ -195,7 +195,7 @@ ggsave(
 )
 
 
-## Expected Cross Model ##
+## Expected Cross Model ## -------------
 
 library(tidymodels)
 
@@ -243,7 +243,7 @@ cross_pred %>%
   roc_auc(truth=shot_assists, .pred_1)
 
 
-### Individual Plots ### ------------
+## Individual Expected Cross Plots ## -------------
 
 plot_input <- ffs %>%
   filter(id=="add0a8bf-f248-4501-9e97-731ee473e603") %>%
