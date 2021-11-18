@@ -87,9 +87,18 @@ area_fx <- function(i){
     slice(2) %>%
     pull(distance)
   
+  dist_1_inpath <- dist %>%
+    filter(in_path==1) %>%
+    arrange(distance) %>%
+    slice(1) %>%
+    pull(distance)
+  
+  dist_1_inpath <- ifelse(is_empty(dist_1_inpath), 0, dist_1_inpath)
+  
   area %>% 
     mutate(dist_1 = dist_1,
-           dist_2 = dist_2)
+           dist_2 = dist_2,
+           dist_1_inpath = dist_1_inpath)
   
 }
   
@@ -110,7 +119,8 @@ crosses <- crosses %>%
   left_join(area, by="id") %>%
   mutate(area_delta = team_area-opp_area,
          goal_dist = (((pass.start_location.x - 120)^2) + ((pass.start_location.y - 40)^2))^0.5,
-         goal_angle = atan2(abs(pass.start_location.x-120), abs(pass.start_location.y-40)))
+         goal_angle = atan2(abs(pass.start_location.x-120), abs(pass.start_location.y-40)),
+         dist_1_inpath = ifelse(dist_1_inpath==0, goal_dist, dist_1_inpath))
 
 team <- crosses %>%
   group_by(team.name) %>%
@@ -203,17 +213,25 @@ crosses_mod <- crosses %>%
   mutate(shot_assists = as.factor(shot_assists)) %>%
   select(-c(player.name, team.name, OpposingTeam, pass.start_location.x, pass.start_location.y))
 
-set.seed(555)
-data_split <- initial_split(crosses_mod, prop = 3/4, strata=shot_assists)
+set.seed(123)
+data_split <- initial_split(crosses_mod, prop = 4/5, strata=shot_assists)
 
 train_data <- training(data_split)
 test_data  <- testing(data_split)
 
+
+set.seed(123)
+val_set <- validation_split(train_data, 
+                            strata = shot_assists, 
+                            prop = 0.80)
+
 cross_rec <-
   recipe(shot_assists ~ ., data=train_data) %>%
-  update_role(id, new_role="ID")
-  step_dummy(all_nominal(), -all_outcomes())
+  update_role(id, new_role="ID") 
   
+
+## GLM ##
+
 lr_mod <- 
   logistic_reg() %>% 
   set_engine("glm")
@@ -241,6 +259,87 @@ cross_pred <- bind_rows(
 
 cross_pred %>%
   roc_auc(truth=shot_assists, .pred_1)
+
+
+## GLMNET ##
+
+net_mod <- 
+  logistic_reg(penalty = tune(), mixture = 0) %>% 
+  set_engine("glmnet")
+
+net_workflow <-
+  workflow() %>% 
+  add_model(net_mod) %>% 
+  add_recipe(cross_rec)
+
+net_reg_grid <- tibble(penalty = 10^seq(-4, -1, length.out = 30))
+
+unregister_dopar <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+}
+unregister_dopar()
+
+net_res <- 
+  net_workflow %>% 
+  tune_grid(val_set,
+            grid = net_reg_grid,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+net_plot <- 
+  net_res %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Area under the ROC Curve") +
+  scale_x_log10(labels = scales::label_number())
+
+net_plot 
+
+top_models <-
+  net_res %>% 
+  show_best("roc_auc", n = 15) %>% 
+  arrange(penalty) 
+
+top_models
+
+net_best <- 
+  net_res %>% 
+  collect_metrics() %>% 
+  arrange(desc(mean)) %>% 
+  slice(2)
+
+net_mod <- 
+  logistic_reg(penalty = net_best %>% pull(penalty), mixture = 1) %>% 
+  set_engine("glmnet")
+
+net_wflow <-
+  workflow() %>%
+  add_model(net_mod) %>%
+  add_recipe(cross_rec)
+
+
+net_fit <- 
+  net_wflow %>% 
+  fit(data = train_data)
+
+coefs <- net_fit %>% 
+  pull_workflow_fit() %>% 
+  tidy()
+
+
+net_pred <- bind_rows(
+  predict(net_fit, test_data, type = "prob") %>% 
+    bind_cols(test_data %>% select(shot_assists, id, attackers, defenders, att_v_def, opp_area, team_area, dist_1_inpath, goal_dist))
+  #  predict(cross_fit, train_data, type = "prob") %>% 
+  #  bind_cols(train_data %>% select(shot_assists, id))
+)
+
+net_pred %>%
+  roc_auc(truth=shot_assists, .pred_1)
+
 
 
 ## Individual Expected Cross Plots ## -------------
@@ -394,5 +493,16 @@ ggsave(
   plot = cross2,
   height = base_size, 
   width = base_size * asp
+)
+
+
+## Cross Characteristic Plots ## -------------
+
+
+pred <- bind_rows(
+  predict(net_fit, test_data, type = "prob") %>% 
+    bind_cols(test_data %>% select(shot_assists, id, attackers, defenders, att_v_def, opp_area, team_area, dist_1_inpath, goal_dist)),
+  predict(cross_fit, train_data, type = "prob") %>% 
+    bind_cols(train_data %>% select(shot_assists, id, attackers, defenders, att_v_def, opp_area, team_area, dist_1_inpath, goal_dist))
 )
 
