@@ -394,12 +394,12 @@ train_cv_folds <-
     preprocessing_recipe, 
     new_data = shot_train
   ) %>%  
-  rsample::vfold_cv(v = 3)
+  rsample::vfold_cv(v = 5)
 
 
 xgboost_model <- 
   parsnip::boost_tree(
-    trees = 200,
+    trees = 500,
     min_n = tune(),
     tree_depth = tune(),
     learn_rate = tune(),
@@ -699,7 +699,9 @@ corr_att <- def_area_match %>%
       filter(side=="defending") %>%
       select(game_id, attacking_team, defending_team, def_xt = xt, def_events = events, def_xt_per = xt_per),
     by=c("game_id", "attacking_team", "defending_team")
-  )
+  ) %>%
+  mutate(def_xt_per_share = 100*(def_xt_per/(def_xt_per+xt_per)))
+
 
 corr_def <- def_area_match %>%
   filter(side=="defending") %>%
@@ -717,12 +719,16 @@ corr_def <- def_area_match %>%
 
 corr_att_event <- def_area_event %>%
   filter(side=="attacking") %>%
-  left_join(goals_event %>% rename(attacking_team=team_name), by=c("original_event_id")) 
+  left_join(goals_event %>% rename(attacking_team=team_name), by=c("original_event_id")) %>%
+  mutate(shot_xg = ifelse(is.na(shot_xg), 0, shot_xg))
 
 
-summary(lm(shot_xg_per ~ xt_per + xg_per, corr_att))
-reg_mod <- lm(shot_xg_per ~ xt_per + xg_per + def_xt_per, corr_att)
-summary(reg_mod)
+#summary(lm(shot_xg_per ~ xt_per + xg_per, corr_att))
+#reg_mod <- lm(shot_xg_per ~ xt_per + xg_per + def_xt_per, corr_att)
+#summary(reg_mod)
+
+reg_mod <- lm(shot_xg_per ~ xg_per + def_xt_per_share, corr_att)
+
 
 reg_predict <- def_area_event %>%
   ungroup() %>%
@@ -734,7 +740,8 @@ reg_predict <- def_area_event %>%
       filter(side=="defending") %>%
       select(original_event_id, def_xt_per = xt),
     by="original_event_id"
-  ) %>% distinct()
+  ) %>% distinct() %>%
+  mutate(def_xt_per_share = 100*(def_xt_per/(def_xt_per+xt_per)))
 
 reg_predict$pred <- predict.lm(reg_mod, reg_predict)
 
