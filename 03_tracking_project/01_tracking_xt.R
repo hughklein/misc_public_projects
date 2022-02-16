@@ -320,7 +320,7 @@ shotinfo_fx <- function(input_event){
   dist <- dist %>%
     mutate(in_cone = ifelse(in_cone!=0, 1, 0))
   
-  tibble(
+ tibble(
     id = input_event,
     location.x=input %>% filter(actor==TRUE) %>% pull(ff_location.x),
     location.y=input %>% filter(actor==TRUE) %>% pull(ff_location.y),
@@ -328,12 +328,17 @@ shotinfo_fx <- function(input_event){
     location.y.GK=input %>% filter(keeper==TRUE) %>% pull(ff_location.y),
     distance.ToD1=dist %>% filter(keeper==FALSE) %>% arrange(distance) %>% slice(1) %>% pull(distance),
     distance.ToD2=dist %>% filter(keeper==FALSE) %>% arrange(distance) %>% slice(2) %>% pull(distance),
+    distance.ToD1cone=ifelse(nrow(dist %>% filter(keeper==FALSE, in_cone==1))==0, NA, dist %>% filter(keeper==FALSE, in_cone==1) %>% arrange(distance) %>% slice(1) %>% pull(distance)),
+#    distance.ToD2cone=dist %>% filter(keeper==FALSE, in_cone==1) %>% arrange(distance) %>% slice(2) %>% pull(distance),
     DefendersInCone=dist %>% filter(keeper==FALSE) %>% summarize(sum=sum(in_cone)) %>% pull(sum),
     InCone.GK=dist %>% filter(keeper==TRUE) %>% pull(in_cone)
   )
     
     
 }
+
+
+
 
 #shot_train <- events %>%
 #  filter(type.name=="Shot") %>%
@@ -368,7 +373,8 @@ all_train <- all_train %>%
     shot.body_part.name = ifelse(is.na(shot.body_part.name), "Feet", shot.body_part.name),
     shot.technique.name = ifelse(is.na(shot.technique.name), "Normal", shot.technique.name),
     shot.outcome.name = ifelse(shot.outcome.name=="Goal", 1, 0)
-  )
+  ) %>%
+  mutate(distance.ToD1cone = ifelse(is.na(distance.ToD1cone), DistToGoal, distance.ToD1cone))
 
 ## xG Model ## -------------------
 library(tidymodels)
@@ -643,6 +649,7 @@ output <- xt_applied %>%
 
 
 def_area_event <- xt_applied %>%
+  distinct() %>%
   left_join(match_teams, by="game_id") %>%
   mutate(
     attacking_team = team_name,
@@ -662,7 +669,8 @@ def_area_event <- xt_applied %>%
               select(original_event_id, actor_xt = xt) %>%
               mutate(actor_xt = ifelse(is.na(actor_xt), 0, actor_xt)) %>%
               st_set_geometry(NULL),
-            by="original_event_id")
+            by="original_event_id") %>%
+  distinct()
 
 def_area_match <- def_area_event %>%
   group_by(game_id, attacking_team, defending_team, side, teammate) %>%
@@ -728,6 +736,7 @@ corr_att_event <- def_area_event %>%
 #summary(reg_mod)
 
 reg_mod <- lm(shot_xg_per ~ xg_per + def_xt_per_share, corr_att)
+summary(reg_mod)
 
 
 reg_predict <- def_area_event %>%
@@ -1030,5 +1039,178 @@ ggsave(
   height = base_size, 
   width = base_size * asp
 )
+
+
+## Defensive Effectiveness Function ## -------------------
+
+match_teams <- events %>%
+  select(game_id = match_id, team_1 = possession_team.name, team_2 = OpposingTeam) %>%
+  distinct() %>%
+  group_by(game_id) %>%
+  slice_head(n=1) %>%
+  ungroup()
+
+ylim = 18
+xlim = 18
+
+def_fx <- function(xlim, ylim){
+  
+  xlim = 120 - xlim
+  
+  goals <- spadl_xt %>%
+    filter(period_id<5) %>%
+    filter(start_x >= xlim) %>%
+    filter(start_y >= ylim, start_y <= 80-ylim) %>%
+    mutate(goal = ifelse(type_name=="Shot" & result_name=="success", 1, 0),
+           shot = ifelse(type_name=="Shot", 1, 0)) %>%
+    filter(type_name=="Shot") %>%
+    inner_join(all_data_prediction %>%
+                 rename(original_event_id = id, shot_xg = xg), by="original_event_id") %>%
+    group_by(game_id, team_name) %>%
+    summarize(
+      goals = sum(goal),
+      shots = sum(shot),
+      shot_xg = sum(shot_xg)
+    )
+  
+  goals_event <- spadl_xt %>%
+    filter(period_id<5) %>%
+    filter(start_x >= xlim) %>%
+    filter(start_y >= ylim, start_y <= 80-ylim) %>%
+    mutate(goal = ifelse(type_name=="Shot" & result_name=="success", 1, 0),
+           shot = ifelse(type_name=="Shot", 1, 0)) %>%
+    filter(type_name=="Shot") %>%
+    inner_join(all_data_prediction %>%
+                 rename(original_event_id = id, shot_xg = xg), by="original_event_id") %>%
+    ungroup() %>%
+    select(original_event_id, team_name,shot_xg) 
+  
+  output <- xt_applied %>%
+    left_join(all_data_prediction %>% rename(original_event_id=id), by="original_event_id")
+  
+  def_area_event <- xt_applied %>%
+    distinct() %>%
+    filter(start_x >= xlim) %>%
+    filter(start_y >= ylim, start_y <= 80-ylim) %>%
+    left_join(match_teams, by="game_id") %>%
+    mutate(
+      attacking_team = team_name,
+      defending_team = ifelse(attacking_team==team_1, team_2, team_1),
+      side = ifelse(teammate==TRUE, "attacking", "defending")
+    ) %>%
+    group_by(original_event_id, game_id, side, teammate, attacking_team, defending_team) %>%
+    summarize(
+      xt = sum(xt, na.rm=T),
+      #    actor_xt = sum(xt[actor==TRUE], na.rm=T),
+      players = n()
+    ) %>%
+    left_join(all_data_prediction %>% rename(original_event_id=id), by="original_event_id") %>%
+    st_set_geometry(NULL) %>%
+    left_join(xt_applied %>%
+                filter(actor==TRUE) %>%
+                select(original_event_id, actor_xt = xt) %>%
+                mutate(actor_xt = ifelse(is.na(actor_xt), 0, actor_xt)) %>%
+                st_set_geometry(NULL),
+              by="original_event_id") %>%
+    distinct()
+  
+  def_area_match <- def_area_event %>%
+    group_by(game_id, attacking_team, defending_team, side, teammate) %>%
+    summarize(
+      xt = sum(xt),
+      events = n(),
+      xt_per = xt/events,
+      actor_xt = sum(actor_xt),
+      actor_xt_per = actor_xt/events,
+      xg = sum(xg, na.rm=T),
+      xg_per = xg/events
+    ) 
+  
+  def_area_comp <- def_area_match %>%
+    group_by(defending_team, side, teammate) %>%
+    summarize(
+      xt = sum(xt),
+      events = sum(events),
+      xt_per = xt/events
+    )
+  
+}
+
+
+
+
+
+
+
+
+
+def_area_comp <- def_area_match %>%
+  group_by(defending_team, side, teammate) %>%
+  summarize(
+    xt = sum(xt),
+    events = sum(events),
+    xt_per = xt/events
+  )
+
+## CORR ##
+
+corr_att <- def_area_match %>%
+  filter(side=="attacking") %>%
+  left_join(goals %>% rename(attacking_team=team_name), by=c("game_id", "attacking_team")) %>%
+  mutate(goals_per = goals/events,
+         shots_per = shots/events,
+         shot_xg_per = shot_xg/events) %>%
+  ungroup() %>%
+  left_join(
+    def_area_match %>%
+      ungroup() %>%
+      filter(side=="defending") %>%
+      select(game_id, attacking_team, defending_team, def_xt = xt, def_events = events, def_xt_per = xt_per),
+    by=c("game_id", "attacking_team", "defending_team")
+  ) %>%
+  mutate(def_xt_per_share = 100*(def_xt_per/(def_xt_per+xt_per)))
+
+
+corr_def <- def_area_match %>%
+  filter(side=="defending") %>%
+  left_join(goals %>% rename(defending_team=team_name), by=c("game_id", "defending_team")) %>%
+  mutate(goals_per = goals/events,
+         shots_per = shots/events,
+         shot_xg_per = shot_xg/events) %>%
+  left_join(
+    def_area_match %>%
+      ungroup() %>%
+      filter(side=="attacking") %>%
+      select(game_id, attacking_team, defending_team, att_xt = xt, att_events = events, att_xt_per = xt_per),
+    by=c("game_id", "attacking_team", "defending_team")
+  )
+
+corr_att_event <- def_area_event %>%
+  filter(side=="attacking") %>%
+  left_join(goals_event %>% rename(attacking_team=team_name), by=c("original_event_id")) %>%
+  mutate(shot_xg = ifelse(is.na(shot_xg), 0, shot_xg))
+
+
+#summary(lm(shot_xg_per ~ xt_per + xg_per, corr_att))
+#reg_mod <- lm(shot_xg_per ~ xt_per + xg_per + def_xt_per, corr_att)
+#summary(reg_mod)
+
+reg_mod <- lm(shot_xg_per ~ xg_per + def_xt_per_share, corr_att)
+
+
+reg_predict <- def_area_event %>%
+  ungroup() %>%
+  filter(side=="attacking") %>%
+  select(original_event_id, xt_per = xt, xg_per = xg) %>%
+  left_join(
+    def_area_event %>%
+      ungroup() %>%
+      filter(side=="defending") %>%
+      select(original_event_id, def_xt_per = xt),
+    by="original_event_id"
+  ) %>% distinct() %>%
+  mutate(def_xt_per_share = 100*(def_xt_per/(def_xt_per+xt_per)))
+
+reg_predict$pred <- predict.lm(reg_mod, reg_predict)
 
 
